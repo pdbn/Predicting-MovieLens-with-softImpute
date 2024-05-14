@@ -2,7 +2,9 @@
 packages <- c("data.table",
               "reshape2", 
               "softImpute",
-              "dplyr")
+              "dplyr",
+              "Matrix",
+              "progress")
 
 packages_to_install <- packages[!packages %in% installed.packages()[,"Package"]]
 
@@ -61,9 +63,9 @@ sample_ratings <- function(ratings, min_ratings_per_user, min_users_per_movie) {
   return(ratings_sample)
 }
 
-# Sample: users rated at least 5 movies, movies get rated at least 5 times
-min_ratings_per_user <- 2
-min_users_per_movie <- 2
+# Sample: users rate at least ... movies, movies get rated at least ... times
+min_ratings_per_user <- 3
+min_users_per_movie <- 3
 ratings_sample <- sample_ratings(ratings_sample, min_ratings_per_user, min_users_per_movie)
 
 # Create the initial matrix
@@ -85,5 +87,55 @@ j <- col(ratings_matrix)[!is.na(ratings_matrix)]
 value <- ratings_matrix[!is.na(ratings_matrix)]
 incomplete_matrix <- Incomplete(i, j, value)
 
-#Implement softImpute
-fit <- softImpute(incomplete_matrix, rank.max= 50, lambda = 19, trace = TRUE, type = "als")
+
+####------------------------------------------------------------------------------####
+
+test_mask <- matrix(FALSE, nrow=nrow(incomplete_matrix), ncol=ncol(incomplete_matrix))
+
+# Step 2: Identify indices of the observed entries
+observed_indices <- which(!is.na(as(incomplete_matrix, "TsparseMatrix")), arr.ind=TRUE)
+
+# Step 3: Randomly select 20% of these indices for testing
+test_indices <- sample(nrow(observed_indices), size = floor(0.2 * nrow(observed_indices)))
+test_mask[observed_indices[test_indices, "row"], observed_indices[test_indices, "col"]] <- TRUE
+
+# Step 4: Create training and test matrices
+train_matrix <- incomplete_matrix
+# For the training set, set the test entries to NA
+train_matrix[test_mask] <- NA
+
+# For the test set, keep only the test entries
+test_matrix <- matrix(NA, nrow=nrow(incomplete_matrix), ncol=ncol(incomplete_matrix))
+test_matrix[test_mask] <- incomplete_matrix[test_mask]
+
+# Generate a sequence of lambda values
+lambdas <- seq(0.5, 100, length.out = 20)
+results <- data.frame(lambda = numeric(), rmse = numeric())
+
+# Initialize progress bar
+pb <- progress_bar$new(total = 20, format = "[:bar] :percent :elapsed ETA: :eta", clear = FALSE)
+
+# Apply SoftImpute for different lambda values
+for (lambda in lambdas) {
+  pb$tick()
+  softImpute_model <- softImpute(train_matrix, lambda=lambda, rank.max=2, maxit=100)
+  completed_matrix <- complete(train_matrix, softImpute_model)
+  
+  if (!is.matrix(completed_matrix)) {
+    completed_matrix <- as.matrix(completed_matrix)
+  }
+  
+  # Evaluate RMSE on the test set
+  predicted_ratings <- sapply(test_matrix, function(x) completed_matrix[x[1], x[2]])
+  true_ratings <- sapply(test_matrix, function(x) x[3])
+  rmse <- sqrt(mean((predicted_ratings - true_ratings)^2))
+  
+  results <- rbind(results, data.frame(lambda = lambda, rmse = rmse))
+}
+
+# Plot RMSE vs. Lambda
+ggplot(results, aes(x = lambda, y = rmse)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "RMSE vs. Lambda", x = "Lambda", y = "RMSE") +
+  theme_minimal()
