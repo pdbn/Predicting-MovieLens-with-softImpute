@@ -7,8 +7,7 @@ packages <- c("data.table",
               "Matrix",
               "progress",
               "ggplot2", 
-              "lubridate",
-              "foreach"
+              "caret"
               )
 
 packages_to_install <- packages[!packages %in% installed.packages()[,"Package"]]
@@ -167,102 +166,55 @@ ggplot(train_long, aes(x = rating)) +
   theme_minimal()
 
 ###------------------------------------------------------------------------------###
-
-###-----------------------------------------------------------------------------###
-
-#Grid search to find optimal parameters
-
-calculate_rmse <- function(true_ratings, predicted_ratings) {
-  sqrt(mean((true_ratings - predicted_ratings)^2))
-}
-
-calculate_nmae <- function(true_ratings, predicted_ratings) {
-  mean(abs(true_ratings - predicted_ratings)) / mean(abs(true_ratings))
-}
-
-cv_softimpute <- function(train_matrix, lambda_seq, max_rank_seq, nfolds = 5) {
-  # Create folds
-  folds <- sample(rep(1:nfolds, length.out = nrow(train_matrix)))
+# Define a function to perform 5-fold cross-validation
+cv_softImpute <- function(matrix, lambda_seq, rank_seq, n_folds = 1) {
+  # Create indices for the folds
+  folds <- createFolds(which(!is.na(matrix)), k = n_folds, list = TRUE, returnTrain = FALSE)
   
-  # Grid search over lambda and max.rank
-  results <- expand.grid(lambda = lambda_seq, max_rank = max_rank_seq)
-  results$rmse <- NA
-  results$nmae <- NA
+  # Initialize variables to store the best parameters
+  best_lambda <- NULL
+  best_rank <- NULL
+  best_error <- Inf
   
-  # Initialize the progress bar
-  total_iterations <- nrow(results) * nfolds
-  pb <- progress_bar$new(
-    format = "  Progress [:bar] :percent in :elapsed",
-    total = total_iterations,
-    clear = FALSE,
-    width = 60
-  )
-  
-  # Perform K-fold cross-validation
-  for (i in 1:nrow(results)) {
-    lambda <- results$lambda[i]
-    max_rank <- results$max_rank[i]
-    
-    # Initialize RMSE and NMAE for this parameter set
-    cv_rmse <- numeric(nfolds)
-    cv_nmae <- numeric(nfolds)
-    
-    for (k in 1:nfolds) {
-      # Split the data into training and validation sets
-      train_fold <- train_matrix
-      train_fold[folds == k, ] <- NA
-      val_fold <- train_matrix[folds == k, , drop = FALSE]
+  # Perform grid search
+  for (lambda in lambda_seq) {
+    for (rank in rank_seq) {
+      errors <- numeric(n_folds)
       
-      # Apply softImpute on the training fold
-      fit <- softImpute(train_fold, lambda = lambda, rank.max = max_rank, type = "als")
-      
-      # Impute the validation fold
-      completed_matrix <- complete(train_fold, fit)
-      
-      # Evaluate on the validation set
-      true_ratings <- numeric()
-      predicted_ratings <- numeric()
-      for (row in 1:nrow(val_fold)) {
-        for (col in 1:ncol(val_fold)) {
-          if (!is.na(val_fold[row, col])) {
-            true_ratings <- c(true_ratings, val_fold[row, col])
-            predicted_ratings <- c(predicted_ratings, completed_matrix[row, col])
-          }
-        }
+      for (fold in 1:n_folds) {
+        test_indices <- folds[[fold]]
+        train_matrix <- matrix
+        train_matrix[test_indices] <- NA
+        
+        # Perform soft impute
+        fit <- softImpute(train_matrix, rank.max = rank, lambda = lambda)
+        completed_matrix <- complete(matrix, fit)
+        
+        # Calculate the error on the test set
+        errors[fold] <- sqrt(mean((matrix[test_indices] - completed_matrix[test_indices])^2, na.rm = TRUE))
       }
       
-      # Calculate RMSE and NMAE
-      cv_rmse[k] <- calculate_rmse(true_ratings, predicted_ratings)
-      cv_nmae[k] <- calculate_nmae(true_ratings, predicted_ratings)
+      # Calculate the mean error for this combination of lambda and rank
+      mean_error <- mean(errors)
       
-      # Update the progress bar
-      pb$tick()
+      # Update the best parameters if the current mean error is lower
+      if (mean_error < best_error) {
+        best_lambda <- lambda
+        best_rank <- rank
+        best_error <- mean_error
+      }
     }
-    
-    # Average RMSE and NMAE across all folds
-    avg_rmse <- mean(cv_rmse)
-    avg_nmae <- mean(cv_nmae)
-    
-    # Store the results
-    results$rmse[i] <- avg_rmse
-    results$nmae[i] <- avg_nmae
   }
   
-  # Return the results as a data frame
-  return(results)
+  return(list(best_lambda = best_lambda, best_rank = best_rank, best_error = best_error))
 }
 
+# Define the grid of parameters to search
+lambda_seq <- seq(0.1, 5, by = 0.5)
+rank_seq <- seq(50, 200, by = 25)
 
+# Run the cross-validation to find the optimal parameters
+result <- cv_softImpute(train_matrix, lambda_seq, rank_seq, n_folds = 1)
 
-#Grid of parameters
-lambda_seq <- seq(0.1, 5, by = 0.1)
-max_rank_seq <- seq(50, 200, by = 25)
-
-results <- cv_softimpute(train_matrix, lambda_seq, max_rank_seq, nfolds = 5)
-
-# Print the results
-print(results)
-
-# Find the best parameters
-best_params <- results[which.min(results$rmse), ]
-print(best_params)
+# Output the result
+print(result)
