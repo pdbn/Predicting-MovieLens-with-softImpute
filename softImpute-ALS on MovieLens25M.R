@@ -5,9 +5,8 @@ packages <- c("data.table",
               "dplyr",
               "Matrix",
               "ggplot2",
-              "caret"
-            
-              )
+              "lubridate",
+              "caret")
 
 packages_to_install <- packages[!packages %in% installed.packages()[,"Package"]]
 
@@ -24,14 +23,15 @@ ratings <- fread("ratings.csv")
 set.seed(6290653)   #student number
 
 #####-----------------------------------------------------------------------#####
+# Data Sampling & Scaling
 
 # Filter data for ratings on or after February 18, 2003 (half-star scale)
 ratings[, datetime := as.POSIXct(timestamp, origin = "1970-01-01", tz = "UTC")]
 ratings[, date := as.Date(datetime)]
 ratings <- ratings[date >= as.Date("2003-02-18")]
 
-# Sample 1% of data randomly 
-sample_size <- 0.02
+# Sample ...% of data randomly 
+sample_size <- 0.03
 n_rows_to_sample <- floor(nrow(ratings) * sample_size)
 sample_indices <- sample(1:nrow(ratings), size = n_rows_to_sample)
 filtered_ratings<- ratings[sample_indices, ]
@@ -71,243 +71,155 @@ sample_ratings <- function(ratings, min_ratings_per_user, min_users_per_movie) {
 }
 
 # Sample: users rate at least ... movies, movies get rated at least ... times
-min_ratings_per_user <- 15
-min_users_per_movie <- 10
+min_ratings_per_user <- 20
+min_users_per_movie <- 15
 ratings_sample <- sample_ratings(filtered_ratings, min_ratings_per_user, min_users_per_movie)
 
-# Create matrix
+# Create ratings matrix
 ratings_matrix <- dcast(ratings_sample, userId ~ movieId, value.var = "rating")
 ratings_matrix <- as.matrix(ratings_matrix[,-1])  #remove first column userId
 print(paste("Number of users: ", nrow(ratings_matrix)))
 print(paste("Number of movies:", ncol(ratings_matrix)))
 
-# Report sparsity
-na_count <- sum(is.na(ratings_matrix))
-na_percentage <- (na_count / length(ratings_matrix)) * 100
-print(paste("NAs: ", na_count, "values"))
-print(paste("Percentage of NA values:", na_percentage, "%"))
-
-test <- ratings_matrix
-test2 <- biScale(test, trace = TRUE)
-test2[13,11] <- NA
-test1[2,7] <- NA
-test1[19,8] <- NA
-fit <- softImpute(test2, rank.max = 100, lambda = 2.5, type = "als", trace.it = TRUE)
-completed_matrix <- complete(test2, fit)
-
-print(completed_matrix[13,11])
-print(completed_matrix[2,7])
-print(completed_matrix[19,8])
-
-# Convert the matrix to a vector
-ratings_vector <- as.vector(completed_matrix)
-
-# Create a data frame for plotting
-ratings_data <- data.frame(Rating = ratings_vector)
-# Plot the distribution
-ggplot(ratings_data, aes(x = Rating)) +
-  geom_histogram(binwidth = 1, fill = "lightblue", color = "black") +
-  labs(title = "Distribution of Movie Ratings", x = "Ratings", y = "Frequency") +
-  theme_minimal()
-
-####------------------------------------------------------------------------------####
-# Initialize a test mask
-test_mask <- matrix(FALSE, nrow=nrow(ratings_matrix), ncol=ncol(ratings_matrix))
-
-# Identify indices of the observed (non-NA) entries
-observed_indices <- which(!is.na(ratings_matrix), arr.ind=TRUE)
-
-# Randomly select 20% of these indices for testing
-sample_size <- floor(0.2 * nrow(observed_indices))
-selected_indices <- sample(seq_len(nrow(observed_indices)), size = sample_size)
-test_mask[observed_indices[selected_indices, "row"], observed_indices[selected_indices, "col"]] <- TRUE
-
-# Create the training matrix
-train_matrix <- ratings_matrix
-train_matrix[test_mask] <- NA  # Set selected test entries to NA in the training matrix
-
-# Create the test matrix
-test_matrix <- matrix(NA, nrow=nrow(ratings_matrix), ncol=ncol(ratings_matrix))
-test_matrix[test_mask] <- ratings_matrix[test_mask]  # Fill test matrix with observed entries from the original matrix
-
-
-# Report sparsity
-na_count <- sum(is.na(train_matrix))
-na_percentage <- (na_count / length(train_matrix)) * 100
-print(paste("NAs: ", na_count, "values"))
-print(paste("Percentage of NA values:", na_percentage, "%"))
-
-# Calculate the number of ratings per user
-ratings_per_user <- rowSums(!is.na(ratings_matrix))
-
-# Calculate the number of ratings per movie
-ratings_per_movie <- colSums(!is.na(ratings_matrix))
-
-# Find the minimum number of ratings per user
-min_ratings_per_user <- min(ratings_per_user)
-
-# Find the minimum number of ratings per movie
-min_ratings_per_movie <- min(ratings_per_movie)
-
-# Print the results
-cat("Minimum number of ratings per user:", min_ratings_per_user, "\n")
-cat("Minimum number of ratings per movie:", min_ratings_per_movie, "\n")
-###-----------------------------------------------------------------------------###
-
-#New sampling
-# Function to check if the conditions are met
-check_conditions <- function(ratings, min_ratings_per_user, min_users_per_movie) {
-  user_check <- ratings %>%
-    group_by(userId) %>%
-    summarise(n = n(), .groups = 'drop') %>%
-    pull(n) >= min_ratings_per_user
-  
-  movie_check <- ratings %>%
-    group_by(movieId) %>%
-    summarise(n = n(), .groups = 'drop') %>%
-    pull(n) >= min_users_per_movie
-  
-  return(all(user_check) && all(movie_check))
+# Function to report sparsity of a matrix
+check_sparsity <- function(matrix){
+  na_count <- sum(is.na(matrix))
+  na_percentage <- (na_count / length(matrix)) * 100
+  print(paste("NAs: ", na_count, "values"))
+  print(paste("Percentage of NA values:", na_percentage, "%"))
 }
 
-# Function to ensure the conditions are met
-ensure_conditions <- function(ratings, min_ratings_per_user, min_users_per_movie) {
-  repeat {
-    movies_sample <- ratings %>%
-      group_by(movieId) %>%
-      summarise(n = n(), .groups = 'drop') %>%
-      filter(n >= min_users_per_movie) %>%
-      pull(movieId)
-    
-    users_sample <- ratings %>%
-      filter(movieId %in% movies_sample) %>%
-      group_by(userId) %>%
-      summarise(n = n(), .groups = 'drop') %>%
-      filter(n >= min_ratings_per_user) %>%
-      pull(userId)
-    
-    new_ratings <- ratings %>%
-      filter(userId %in% users_sample, movieId %in% movies_sample)
-    
-    if (check_conditions(new_ratings, min_ratings_per_user, min_users_per_movie)) {
-      break
-    }
-  }
-  
-  return(new_ratings)
+# Function to check min number of ratings (columns and rows) of rating matrix
+check_min_ratings <- function(matrix) {
+  ratings_per_user <- rowSums(!is.na(matrix))
+  ratings_per_movie <- colSums(!is.na(matrix))
+  min_ratings_per_user <- min(ratings_per_user)
+  min_ratings_per_movie <- min(ratings_per_movie)
+  cat("Minimum number of ratings per user:", min_ratings_per_user, "\n")
+  cat("Minimum number of ratings per movie:", min_ratings_per_movie, "\n")
 }
 
-# Function to create a valid train matrix
-create_train_matrix <- function(ratings_matrix, min_ratings_per_user, min_users_per_movie, initial_sample_fraction = 0.9, final_sample_fraction = 0.9) {
-  repeat {
-    observed_indices <- which(!is.na(ratings_matrix), arr.ind = TRUE)
-    
-    initial_sample_size <- floor(initial_sample_fraction * nrow(observed_indices))
-    initial_selected_indices <- sample(seq_len(nrow(observed_indices)), size = initial_sample_size)
-    initial_train_indices <- observed_indices[initial_selected_indices, ]
-    
-    train_matrix <- matrix(NA, nrow = nrow(ratings_matrix), ncol = ncol(ratings_matrix))
-    train_matrix[initial_train_indices] <- ratings_matrix[initial_train_indices]
-    
-    train_ratings <- as.data.frame(as.table(train_matrix))
-    colnames(train_ratings) <- c("userId", "movieId", "rating")
-    train_ratings <- train_ratings %>% filter(!is.na(rating))
-    
-    final_train_ratings <- ensure_conditions(train_ratings, min_ratings_per_user, min_users_per_movie)
-    
-    if (check_conditions(final_train_ratings, min_ratings_per_user, min_users_per_movie)) {
-      final_sample_size <- floor(final_sample_fraction * nrow(final_train_ratings))
-      final_selected_indices <- sample(seq_len(nrow(final_train_ratings)), size = final_sample_size)
-      final_train_ratings <- final_train_ratings[final_selected_indices, ]
-      
-      if (check_conditions(final_train_ratings, min_ratings_per_user, min_users_per_movie)) {
-        break
-      }
-    }
-  }
-  
-  final_train_matrix <- matrix(NA, nrow = nrow(ratings_matrix), ncol = ncol(ratings_matrix))
-  final_train_matrix[cbind(final_train_ratings$userId, final_train_ratings$movieId)] <- final_train_ratings$rating
-  
-  return(final_train_matrix)
-}
+# Report sparsity of ratings matrix
+check_sparsity(ratings_matrix)
 
-# Set the minimum ratings criteria
-min_ratings_per_user <- 10
-min_users_per_movie <- 5
-
-# Time the creation of the train matrix
-start_time <- Sys.time()
-train_matrix <- create_train_matrix(ratings_matrix, min_ratings_per_user, min_users_per_movie, initial_sample_fraction = 0.9, final_sample_fraction = 0.8)
-end_time <- Sys.time()
-
-# Print the time taken
-time_taken <- end_time - start_time
-print(paste("Time taken for creating train matrix:", time_taken))
-
-# Create the test matrix
-test_matrix <- ratings_matrix
-test_matrix[!is.na(train_matrix)] <- NA
-
-# Check the final train matrix
-train_ratings <- as.data.frame(as.table(train_matrix))
-colnames(train_ratings) <- c("userId", "movieId", "rating")
-train_ratings <- train_ratings %>% filter(!is.na(rating))
-
-# Check the minimum number of ratings per movie in the train matrix
-min_ratings_per_movie_in_train <- train_ratings %>%
-  group_by(movieId) %>%
-  summarise(n = n(), .groups = 'drop') %>%
-  summarise(min_n = min(n))
-
-print(min_ratings_per_movie_in_train)
-
-# Check the minimum number of ratings per user in the train matrix
-min_ratings_per_user_in_train <- train_ratings %>%
-  group_by(userId) %>%
-  summarise(n = n(), .groups = 'drop') %>%
-  summarise(min_n = min(n))
-
-print(min_ratings_per_user_in_train)
-
-# Check the proportion of data in the train matrix
-observed_entries <- sum(!is.na(ratings_matrix))
-train_entries <- sum(!is.na(train_matrix))
-print(paste("Proportion of data in train matrix:", train_entries / observed_entries))
+# Check min number of ratings for generated ratings matrix 
+# (should >= set values)
+check_min_ratings(ratings_matrix)
 
 ###-----------------------------------------------------------------------------###
+# softImpute-specific transformation
 
-# Function to convert matrix to incomplete class 
-convert_to_incomplete <- function(matrix) {
+# Function to transform ratings matrix into Incomplete class for computation efficiency
+convert_Incomplete <- function(matrix){
   i <- row(matrix)[!is.na(matrix)]
   j <- col(matrix)[!is.na(matrix)]
-  value <- matrix[!is.na(matrix)]
   if (length(i) == 0 || length(j) == 0) {
     stop("The matrix dimensions are invalid.")
   }
-  incomplete_matrix <- softImpute::Incomplete(i, j, value)
-  
+  value <- matrix[!is.na(matrix)]
+  incomplete_matrix <- Incomplete(i, j, value)
   return(incomplete_matrix)
 }
 
-# Define custom RMSE and MAE calculation functions
+#So far not used
+
+ratings_incomplete <- convert_Incomplete(ratings_matrix)
+
+# Scaling data 
+ratings_scaled <- biScale(ratings_incomplete, trace = TRUE)  # Final transformed matrix
+
+###-----------------------------------------------------------------------------###
+# Initial plots and graphs for ratings sample/matrix
+
+# Plot probability distribution of ratings (0.5 - 5 stars)
+ggplot(ratings_sample, aes(x = rating)) +
+  geom_histogram(aes(y = ..density..), binwidth = 0.5, fill = "lightblue", color = "black", alpha = 0.7) +
+  scale_x_continuous(breaks = seq(0.5, 5, 0.5)) +
+  labs(title = "Probability Distribution of Ratings", x = "Rating", y = "Probability") +
+  theme_minimal()
+
+# Plot distribution of ratings per user
+ratings_sample %>%
+  group_by(userId) %>%
+  summarise(avg_rating = mean(rating), count = n()) %>%
+  ggplot(aes(x = count, y = avg_rating)) +
+  geom_point() +
+  labs(title = "Average Rating by Number of Ratings per User", x = "Number of Ratings", y = "Average Rating") +
+  theme_minimal()
+
+# Plot rating frequency
+rating_counts_df <- ratings_sample %>%
+  group_by(userId) %>%
+  summarise(rating_count = n())
+
+ggplot(rating_counts_df, aes(x = rating_count)) +
+  geom_histogram(binwidth = 1, fill = "lightblue", color = "black", alpha = 0.7) +
+  labs(title = "Distribution of Number of Ratings per User", x = "Number of Ratings", y = "Count of Users") +
+  theme_minimal()
+
+# Plot average rating over time (every 6 months)
+ratings_sample %>%
+  mutate(six_month_period = floor_date(date, "6 months")) %>%
+  group_by(six_month_period) %>%
+  summarise(avg_rating = mean(rating)) %>%
+  ggplot(aes(x = six_month_period, y = avg_rating)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Average Rating Over Time (Every 6 Months)", x = "Date", y = "Average Rating") +
+  theme_minimal() +
+  scale_x_date(date_labels = "%Y", date_breaks = "1 year")
+
+####------------------------------------------------------------------------------####
+# Generate train, test set to evaluate softImpute
+
+# Step 1: Initialize a test mask
+test_mask <- matrix(FALSE, nrow=nrow(ratings_matrix), ncol=ncol(ratings_matrix))
+
+# Step 2: Identify indices of the observed (non-NA) entries
+observed_indices <- which(!is.na(as.matrix(ratings_matrix)), arr.ind=TRUE)
+
+# Step 3: Randomly select 10% of these indices for testing
+sample_size <- floor(0.001 * nrow(observed_indices))
+selected_indices <- observed_indices[sample(seq_len(nrow(observed_indices)), size = sample_size), ]
+
+# Update test_mask in a vectorized manner
+test_mask[selected_indices] <- TRUE
+
+# Step 4: Create the training matrix
+train_matrix <- as.matrix(ratings_matrix)
+train_matrix[test_mask] <- NA  # Set selected test entries to NA in the training matrix
+
+# Step 5: Create the test matrix
+test_matrix <- matrix(NA, nrow=nrow(ratings_matrix), ncol=ncol(ratings_matrix))
+test_matrix[test_mask] <- as.matrix(ratings_matrix)[test_mask] 
+
+# Check sparsity of train matrix
+check_sparsity(train_matrix)
+
+# Check min number of ratings in train matrix
+check_min_ratings(train_matrix)
+
+###-----------------------------------------------------------------------------###
+# Errors functions 
+
+# Define RMSE calculation functions
 calculate_rmse <- function(true_ratings, predicted_ratings) {
   sqrt(mean((true_ratings - predicted_ratings)^2))
 }
 
+# Define MAE calculation functions
 calculate_mae <- function(true_ratings, predicted_ratings) {
   mean(abs(true_ratings - predicted_ratings))
 }
 
+# NMAE????
+
+###-----------------------------------------------------------------------------###
+#K-fold cross validation on train matrix for tuning parameters
 cv_softImpute <- function(matrix, lambda_seq, rank_seq, n_folds) {
   # Create indices for the folds
   observed_indices <- which(!is.na(matrix))
   folds <- createFolds(observed_indices, k = n_folds, list = TRUE, returnTrain = FALSE)
-  
-  # Ensure that each fold has at least one observed entry
-  if (length(observed_indices) < n_folds) {
-    stop("The number of observed entries is less than the number of folds.")
-  }
   
   # Initialize variables to store the best parameters
   best_lambda_rmse <- NULL
@@ -336,34 +248,17 @@ cv_softImpute <- function(matrix, lambda_seq, rank_seq, n_folds) {
         test_indices <- observed_indices[folds[[fold]]]
         train_set <- matrix
         train_set[test_indices] <- NA
-        train_set <-  convert_to_incomplete(train_set)
-        
-        rank_max <- min(dim(train_set))
-        rank <- min (rank, rank_max)
-        if (rank_max < 1) {
-          stop("rank.max must be at least 1.")
-        }
         
         # Perform soft impute
+        train_set <- convert_Incomplete(train_set)
+        train_set <- biScale(train_set)
         fit <- softImpute(train_set,lambda = lambda, rank.max=rank, type = "als")
         completed_matrix <- softImpute::complete(train_set, fit)
-        if(lambda == 0.1 & rank ==50){
-          View(completed_matrix)
-        }
-        # Collect true and predicted ratings
-        true_ratings <- numeric()
-        predicted_ratings <- numeric()
-        for (i in seq_len(nrow(matrix))) {
-          for (j in seq_len(ncol(matrix))) {
-            index <- (i - 1) * ncol(matrix) + j
-            if (index %in% test_indices) {
-              if (!is.na(matrix[i, j])) {
-                true_ratings <- c(true_ratings, matrix[i, j])
-                predicted_ratings <- c(predicted_ratings, completed_matrix[i, j])
-              }
-            }
-          }
-        }
+
+        # Collect true and predicted ratings to calculate RMSE, MAE 
+        true_ratings <- matrix[test_indices]
+        predicted_ratings <- completed_matrix[test_indices]
+      
         
         # Calculate RMSE and MAE
         rmse_errors[fold] <- calculate_rmse(true_ratings, predicted_ratings)
@@ -412,8 +307,8 @@ cv_softImpute <- function(matrix, lambda_seq, rank_seq, n_folds) {
 }
 
 # Define the grid of parameters to search
-lambda_seq <- seq(0.01, 2, by = 1)
-rank_seq <- seq(50, 100, by = 50)
+lambda_seq <- seq(0.1, 2, by = 0.45)
+rank_seq <- seq(50, 100, by = 20)
 
 
 # Run the cross-validation to find the optimal parameters
@@ -442,11 +337,12 @@ ggplot(result$mae_results, aes(x = lambda, y = rank, fill = mae)) +
        x = "Lambda", y = "Rank", fill = "MAE") +
   theme_minimal()
 
-sparse_train <- train_matrix
-biscaled_train <- biScale(train_matrix, thresh = 1e-4, trace = TRUE)
-train_fit <- softImpute(biscaled_train, lambda = 0.8, rank.max = 100, trace.it = TRUE, type = "als")
-debiased_train_fit <- deBias(sparse_train, train_fit)
-complete_train <- softImpute::complete(biscaled_train, train_fit)
+###---------------------------------------------------------------------------###
+# Fit to predict test
+train_matrix <- convert_Incomplete(train_matrix)
+train_matrix <- biScale(train_matrix, trace = TRUE)
+fit <- softImpute(train_matrix, lambda = 1.9, rank.max = 90, trace.it = TRUE)
+complete_train <- complete(train_matrix, fit)
 
 
 # Collect true and predicted ratings
