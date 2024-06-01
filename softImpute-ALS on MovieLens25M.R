@@ -34,37 +34,46 @@ ratings <- ratings[date >= as.Date("2003-02-18")]
 sample_size <- 0.02
 n_rows_to_sample <- floor(nrow(ratings) * sample_size)
 sample_indices <- sample(1:nrow(ratings), size = n_rows_to_sample)
-ratings_sample <- ratings[sample_indices, ]
-head(ratings_sample)
+filtered_ratings<- ratings[sample_indices, ]
+head(filtered_ratings)
 
 # Function to sample data ensuring each user rates a certain number of movies and each movie is rated at least a certain time
 sample_ratings <- function(ratings, min_ratings_per_user, min_users_per_movie) {
-  # Ensure each movie is rated at least min_users_per_movie
-  movies_sample <- ratings %>%
-    group_by(movieId) %>%
-    summarise(n = n(), .groups = 'drop') %>%
-    filter(n >= min_users_per_movie) %>%
-    pull(movieId)
+  repeat {
+    # Filter movies that are rated by at least min_users_per_movie users
+    movies_sample <- ratings %>%
+      group_by(movieId) %>%
+      summarise(n = n(), .groups = 'drop') %>%
+      filter(n >= min_users_per_movie) %>%
+      pull(movieId)
+    
+    # Filter users who have rated at least min_ratings_per_user movies
+    users_sample <- ratings %>%
+      filter(movieId %in% movies_sample) %>%
+      group_by(userId) %>%
+      summarise(n = n(), .groups = 'drop') %>%
+      filter(n >= min_ratings_per_user) %>%
+      pull(userId)
+    
+    # Filter the ratings based on the sampled movies and users
+    new_ratings_sample <- ratings %>%
+      filter(userId %in% users_sample, movieId %in% movies_sample)
+    
+    # Check if the new sample is the same as the previous sample
+    if (nrow(new_ratings_sample) == nrow(ratings)) {
+      break
+    } else {
+      ratings <- new_ratings_sample
+    }
+  }
   
-  # Ensure each user rates at least min_ratings_per_user movies
-  users_sample <- ratings %>%
-    filter(movieId %in% movies_sample) %>%
-    group_by(userId) %>%
-    summarise(n = n(), .groups = 'drop') %>%
-    filter(n >= min_ratings_per_user) %>%
-    pull(userId)
-  
-  # Get the final sample
-  ratings_sample <- ratings %>%
-    filter(userId %in% users_sample, movieId %in% movies_sample)
-  
-  return(ratings_sample)
+  return(ratings)
 }
 
 # Sample: users rate at least ... movies, movies get rated at least ... times
-min_ratings_per_user <- 20
-min_users_per_movie <- 20
-ratings_sample <- sample_ratings(ratings_sample, min_ratings_per_user, min_users_per_movie)
+min_ratings_per_user <- 15
+min_users_per_movie <- 10
+ratings_sample <- sample_ratings(filtered_ratings, min_ratings_per_user, min_users_per_movie)
 
 # Create matrix
 ratings_matrix <- dcast(ratings_sample, userId ~ movieId, value.var = "rating")
@@ -79,16 +88,17 @@ print(paste("NAs: ", na_count, "values"))
 print(paste("Percentage of NA values:", na_percentage, "%"))
 
 test <- ratings_matrix
-test1 <- biScale(test, trace = TRUE)
-test1[13,11] <- NA
+test2 <- biScale(test, trace = TRUE)
+test2[13,11] <- NA
 test1[2,7] <- NA
 test1[19,8] <- NA
-fit <- softImpute(test1, rank.max = 100, lambda = 2.5, type = "als", trace.it = TRUE)
-completed_matrix <- complete(test, fit)
+fit <- softImpute(test2, rank.max = 100, lambda = 2.5, type = "als", trace.it = TRUE)
+completed_matrix <- complete(test2, fit)
 
 print(completed_matrix[13,11])
 print(completed_matrix[2,7])
 print(completed_matrix[19,8])
+
 # Convert the matrix to a vector
 ratings_vector <- as.vector(completed_matrix)
 
@@ -128,10 +138,10 @@ print(paste("NAs: ", na_count, "values"))
 print(paste("Percentage of NA values:", na_percentage, "%"))
 
 # Calculate the number of ratings per user
-ratings_per_user <- rowSums(!is.na(train_matrix))
+ratings_per_user <- rowSums(!is.na(ratings_matrix))
 
 # Calculate the number of ratings per movie
-ratings_per_movie <- colSums(!is.na(train_matrix))
+ratings_per_movie <- colSums(!is.na(ratings_matrix))
 
 # Find the minimum number of ratings per user
 min_ratings_per_user <- min(ratings_per_user)
@@ -142,6 +152,129 @@ min_ratings_per_movie <- min(ratings_per_movie)
 # Print the results
 cat("Minimum number of ratings per user:", min_ratings_per_user, "\n")
 cat("Minimum number of ratings per movie:", min_ratings_per_movie, "\n")
+###-----------------------------------------------------------------------------###
+
+#New sampling
+# Function to check if the conditions are met
+check_conditions <- function(ratings, min_ratings_per_user, min_users_per_movie) {
+  user_check <- ratings %>%
+    group_by(userId) %>%
+    summarise(n = n(), .groups = 'drop') %>%
+    pull(n) >= min_ratings_per_user
+  
+  movie_check <- ratings %>%
+    group_by(movieId) %>%
+    summarise(n = n(), .groups = 'drop') %>%
+    pull(n) >= min_users_per_movie
+  
+  return(all(user_check) && all(movie_check))
+}
+
+# Function to ensure the conditions are met
+ensure_conditions <- function(ratings, min_ratings_per_user, min_users_per_movie) {
+  repeat {
+    movies_sample <- ratings %>%
+      group_by(movieId) %>%
+      summarise(n = n(), .groups = 'drop') %>%
+      filter(n >= min_users_per_movie) %>%
+      pull(movieId)
+    
+    users_sample <- ratings %>%
+      filter(movieId %in% movies_sample) %>%
+      group_by(userId) %>%
+      summarise(n = n(), .groups = 'drop') %>%
+      filter(n >= min_ratings_per_user) %>%
+      pull(userId)
+    
+    new_ratings <- ratings %>%
+      filter(userId %in% users_sample, movieId %in% movies_sample)
+    
+    if (check_conditions(new_ratings, min_ratings_per_user, min_users_per_movie)) {
+      break
+    }
+  }
+  
+  return(new_ratings)
+}
+
+# Function to create a valid train matrix
+create_train_matrix <- function(ratings_matrix, min_ratings_per_user, min_users_per_movie, initial_sample_fraction = 0.9, final_sample_fraction = 0.9) {
+  repeat {
+    observed_indices <- which(!is.na(ratings_matrix), arr.ind = TRUE)
+    
+    initial_sample_size <- floor(initial_sample_fraction * nrow(observed_indices))
+    initial_selected_indices <- sample(seq_len(nrow(observed_indices)), size = initial_sample_size)
+    initial_train_indices <- observed_indices[initial_selected_indices, ]
+    
+    train_matrix <- matrix(NA, nrow = nrow(ratings_matrix), ncol = ncol(ratings_matrix))
+    train_matrix[initial_train_indices] <- ratings_matrix[initial_train_indices]
+    
+    train_ratings <- as.data.frame(as.table(train_matrix))
+    colnames(train_ratings) <- c("userId", "movieId", "rating")
+    train_ratings <- train_ratings %>% filter(!is.na(rating))
+    
+    final_train_ratings <- ensure_conditions(train_ratings, min_ratings_per_user, min_users_per_movie)
+    
+    if (check_conditions(final_train_ratings, min_ratings_per_user, min_users_per_movie)) {
+      final_sample_size <- floor(final_sample_fraction * nrow(final_train_ratings))
+      final_selected_indices <- sample(seq_len(nrow(final_train_ratings)), size = final_sample_size)
+      final_train_ratings <- final_train_ratings[final_selected_indices, ]
+      
+      if (check_conditions(final_train_ratings, min_ratings_per_user, min_users_per_movie)) {
+        break
+      }
+    }
+  }
+  
+  final_train_matrix <- matrix(NA, nrow = nrow(ratings_matrix), ncol = ncol(ratings_matrix))
+  final_train_matrix[cbind(final_train_ratings$userId, final_train_ratings$movieId)] <- final_train_ratings$rating
+  
+  return(final_train_matrix)
+}
+
+# Set the minimum ratings criteria
+min_ratings_per_user <- 10
+min_users_per_movie <- 5
+
+# Time the creation of the train matrix
+start_time <- Sys.time()
+train_matrix <- create_train_matrix(ratings_matrix, min_ratings_per_user, min_users_per_movie, initial_sample_fraction = 0.9, final_sample_fraction = 0.8)
+end_time <- Sys.time()
+
+# Print the time taken
+time_taken <- end_time - start_time
+print(paste("Time taken for creating train matrix:", time_taken))
+
+# Create the test matrix
+test_matrix <- ratings_matrix
+test_matrix[!is.na(train_matrix)] <- NA
+
+# Check the final train matrix
+train_ratings <- as.data.frame(as.table(train_matrix))
+colnames(train_ratings) <- c("userId", "movieId", "rating")
+train_ratings <- train_ratings %>% filter(!is.na(rating))
+
+# Check the minimum number of ratings per movie in the train matrix
+min_ratings_per_movie_in_train <- train_ratings %>%
+  group_by(movieId) %>%
+  summarise(n = n(), .groups = 'drop') %>%
+  summarise(min_n = min(n))
+
+print(min_ratings_per_movie_in_train)
+
+# Check the minimum number of ratings per user in the train matrix
+min_ratings_per_user_in_train <- train_ratings %>%
+  group_by(userId) %>%
+  summarise(n = n(), .groups = 'drop') %>%
+  summarise(min_n = min(n))
+
+print(min_ratings_per_user_in_train)
+
+# Check the proportion of data in the train matrix
+observed_entries <- sum(!is.na(ratings_matrix))
+train_entries <- sum(!is.na(train_matrix))
+print(paste("Proportion of data in train matrix:", train_entries / observed_entries))
+
 ###-----------------------------------------------------------------------------###
 
 # Function to convert matrix to incomplete class 
@@ -310,7 +443,7 @@ ggplot(result$mae_results, aes(x = lambda, y = rank, fill = mae)) +
   theme_minimal()
 
 sparse_train <- train_matrix
-biscaled_train <- biScale(sparse_train, trace = TRUE)
+biscaled_train <- biScale(train_matrix, thresh = 1e-4, trace = TRUE)
 train_fit <- softImpute(biscaled_train, lambda = 0.8, rank.max = 100, trace.it = TRUE, type = "als")
 debiased_train_fit <- deBias(sparse_train, train_fit)
 complete_train <- softImpute::complete(biscaled_train, train_fit)
