@@ -3,11 +3,10 @@ packages <- c("data.table",
               "reshape2", 
               "softImpute",
               "dplyr",
-              "tidyr",
               "Matrix",
-              "progress",
-              "ggplot2", 
+              "ggplot2",
               "caret"
+            
               )
 
 packages_to_install <- packages[!packages %in% installed.packages()[,"Package"]]
@@ -21,7 +20,6 @@ setwd()
 
 #Read CSV file
 ratings <- fread("ratings.csv")
-head(ratings)
 
 set.seed(6290653)   #student number
 
@@ -33,16 +31,10 @@ ratings[, date := as.Date(datetime)]
 ratings <- ratings[date >= as.Date("2003-02-18")]
 
 # Sample 1% of data randomly 
-sample_size <- 0.01
+sample_size <- 0.02
 n_rows_to_sample <- floor(nrow(ratings) * sample_size)
 sample_indices <- sample(1:nrow(ratings), size = n_rows_to_sample)
 ratings_sample <- ratings[sample_indices, ]
-head(ratings_sample)
-
-
-# Print structure, summary of sampled data
-str(ratings_sample)
-summary(ratings_sample)
 head(ratings_sample)
 
 # Function to sample data ensuring each user rates a certain number of movies and each movie is rated at least a certain time
@@ -70,54 +62,13 @@ sample_ratings <- function(ratings, min_ratings_per_user, min_users_per_movie) {
 }
 
 # Sample: users rate at least ... movies, movies get rated at least ... times
-min_ratings_per_user <- 10
-min_users_per_movie <- 10
+min_ratings_per_user <- 20
+min_users_per_movie <- 20
 ratings_sample <- sample_ratings(ratings_sample, min_ratings_per_user, min_users_per_movie)
 
-#Plotting probability distribution of ratings (0.5 - 5 stars)
-ggplot(ratings_sample, aes(x = rating)) +
-  geom_histogram(aes(y = ..density..), binwidth = 0.5, fill = "lightblue", color = "black", alpha = 0.7) +
-  scale_x_continuous(breaks = seq(0.5, 5, 0.5)) +
-  labs(title = "Probability Distribution of Ratings", x = "Rating", y = "Probability") +
-  theme_minimal()
-
-#Distribution of ratings per user
-ratings_sample %>%
-  group_by(userId) %>%
-  summarise(avg_rating = mean(rating), count = n()) %>%
-  ggplot(aes(x = count, y = avg_rating)) +
-  geom_point() +
-  labs(title = "Average Rating by Number of Ratings per User", x = "Number of Ratings", y = "Average Rating") +
-  theme_minimal()
-
-# Rating Frequency
-# Calculate the number of ratings each user has given
-rating_counts_df <- ratings_sample %>%
-  group_by(userId) %>%
-  summarise(rating_count = n())
-
-ggplot(rating_counts_df, aes(x = rating_count)) +
-  geom_histogram(binwidth = 1, fill = "lightblue", color = "black", alpha = 0.7) +
-  labs(title = "Distribution of Number of Ratings per User", x = "Number of Ratings", y = "Count of Users") +
-  theme_minimal()
-
-# Average Rating over time
-ratings_sample %>%
-  mutate(six_month_period = floor_date(date, "6 months")) %>%
-  group_by(six_month_period) %>%
-  summarise(avg_rating = mean(rating)) %>%
-  ggplot(aes(x = six_month_period, y = avg_rating)) +
-  geom_line() +
-  geom_point() +
-  labs(title = "Average Rating Over Time (Every 6 Months)", x = "Date", y = "Average Rating") +
-  theme_minimal() +
-  scale_x_date(date_labels = "%Y", date_breaks = "1 year")
-
-####------------------------------------------------------------------------------###
-# Create the initial matrix
+# Create matrix
 ratings_matrix <- dcast(ratings_sample, userId ~ movieId, value.var = "rating")
 ratings_matrix <- as.matrix(ratings_matrix[,-1])  #remove first column userId
-print(dim(ratings_matrix))   # users x  movies
 print(paste("Number of users: ", nrow(ratings_matrix)))
 print(paste("Number of movies:", ncol(ratings_matrix)))
 
@@ -127,15 +78,29 @@ na_percentage <- (na_count / length(ratings_matrix)) * 100
 print(paste("NAs: ", na_count, "values"))
 print(paste("Percentage of NA values:", na_percentage, "%"))
 
-# Convert ratings_matrix into Incomplete class
-i <- row(ratings_matrix)[!is.na(ratings_matrix)]
-j <- col(ratings_matrix)[!is.na(ratings_matrix)]
-value <- ratings_matrix[!is.na(ratings_matrix)]
-incomplete_matrix <- Incomplete(i, j, value)
+test <- ratings_matrix
+test1 <- biScale(test, trace = TRUE)
+test1[13,11] <- NA
+test1[2,7] <- NA
+test1[19,8] <- NA
+fit <- softImpute(test1, rank.max = 100, lambda = 2.5, type = "als", trace.it = TRUE)
+completed_matrix <- complete(test, fit)
 
+print(completed_matrix[13,11])
+print(completed_matrix[2,7])
+print(completed_matrix[19,8])
+# Convert the matrix to a vector
+ratings_vector <- as.vector(completed_matrix)
+
+# Create a data frame for plotting
+ratings_data <- data.frame(Rating = ratings_vector)
+# Plot the distribution
+ggplot(ratings_data, aes(x = Rating)) +
+  geom_histogram(binwidth = 1, fill = "lightblue", color = "black") +
+  labs(title = "Distribution of Movie Ratings", x = "Ratings", y = "Frequency") +
+  theme_minimal()
 
 ####------------------------------------------------------------------------------####
-
 # Initialize a test mask
 test_mask <- matrix(FALSE, nrow=nrow(ratings_matrix), ncol=ncol(ratings_matrix))
 
@@ -151,70 +116,314 @@ test_mask[observed_indices[selected_indices, "row"], observed_indices[selected_i
 train_matrix <- ratings_matrix
 train_matrix[test_mask] <- NA  # Set selected test entries to NA in the training matrix
 
-# Step 5: Create the test matrix
+# Create the test matrix
 test_matrix <- matrix(NA, nrow=nrow(ratings_matrix), ncol=ncol(ratings_matrix))
 test_matrix[test_mask] <- ratings_matrix[test_mask]  # Fill test matrix with observed entries from the original matrix
 
-#Probability distribution in train matrix
-train_plotdf <- as.data.frame(train_matrix)
-train_long <- pivot_longer(train_plotdf, cols = everything(), names_to = "movieId", values_to = "rating")
-train_long <- train_long %>% filter(!is.na(rating))
-ggplot(train_long, aes(x = rating)) +
-  geom_histogram(aes(y = ..density..), binwidth = 0.5, fill = "lightblue", color = "black", alpha = 0.7) +
-  scale_x_continuous(breaks = seq(0.5, 5, 0.5)) +
-  labs(title = "Probability Distribution of Train Ratings", x = "Rating", y = "Probability") +
-  theme_minimal()
 
-###------------------------------------------------------------------------------###
-# Define a function to perform 5-fold cross-validation
-cv_softImpute <- function(matrix, lambda_seq, rank_seq, n_folds = 1) {
+# Report sparsity
+na_count <- sum(is.na(train_matrix))
+na_percentage <- (na_count / length(train_matrix)) * 100
+print(paste("NAs: ", na_count, "values"))
+print(paste("Percentage of NA values:", na_percentage, "%"))
+
+# Calculate the number of ratings per user
+ratings_per_user <- rowSums(!is.na(train_matrix))
+
+# Calculate the number of ratings per movie
+ratings_per_movie <- colSums(!is.na(train_matrix))
+
+# Find the minimum number of ratings per user
+min_ratings_per_user <- min(ratings_per_user)
+
+# Find the minimum number of ratings per movie
+min_ratings_per_movie <- min(ratings_per_movie)
+
+# Print the results
+cat("Minimum number of ratings per user:", min_ratings_per_user, "\n")
+cat("Minimum number of ratings per movie:", min_ratings_per_movie, "\n")
+###-----------------------------------------------------------------------------###
+
+# Function to convert matrix to incomplete class 
+convert_to_incomplete <- function(matrix) {
+  i <- row(matrix)[!is.na(matrix)]
+  j <- col(matrix)[!is.na(matrix)]
+  value <- matrix[!is.na(matrix)]
+  if (length(i) == 0 || length(j) == 0) {
+    stop("The matrix dimensions are invalid.")
+  }
+  incomplete_matrix <- softImpute::Incomplete(i, j, value)
+  
+  return(incomplete_matrix)
+}
+
+# Define custom RMSE and MAE calculation functions
+calculate_rmse <- function(true_ratings, predicted_ratings) {
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+
+calculate_mae <- function(true_ratings, predicted_ratings) {
+  mean(abs(true_ratings - predicted_ratings))
+}
+
+cv_softImpute <- function(matrix, lambda_seq, rank_seq, n_folds) {
   # Create indices for the folds
-  folds <- createFolds(which(!is.na(matrix)), k = n_folds, list = TRUE, returnTrain = FALSE)
+  observed_indices <- which(!is.na(matrix))
+  folds <- createFolds(observed_indices, k = n_folds, list = TRUE, returnTrain = FALSE)
+  
+  # Ensure that each fold has at least one observed entry
+  if (length(observed_indices) < n_folds) {
+    stop("The number of observed entries is less than the number of folds.")
+  }
   
   # Initialize variables to store the best parameters
-  best_lambda <- NULL
-  best_rank <- NULL
-  best_error <- Inf
+  best_lambda_rmse <- NULL
+  best_rank_rmse <- NULL
+  best_rmse <- Inf
+  
+  best_lambda_mae <- NULL
+  best_rank_mae <- NULL
+  best_mae <- Inf
+  
+  # Initialize data frames to store results
+  rmse_results <- data.frame(lambda = numeric(), rank = numeric(), rmse = numeric())
+  mae_results <- data.frame(lambda = numeric(), rank = numeric(), mae = numeric())
+  
+  total_iterations <- length(lambda_seq) * length(rank_seq) * n_folds
+  iteration <- 0
+  start_time <- Sys.time()
   
   # Perform grid search
   for (lambda in lambda_seq) {
     for (rank in rank_seq) {
-      errors <- numeric(n_folds)
+      rmse_errors <- numeric(n_folds)
+      mae_errors <- numeric(n_folds)
       
       for (fold in 1:n_folds) {
-        test_indices <- folds[[fold]]
-        train_matrix <- matrix
-        train_matrix[test_indices] <- NA
+        test_indices <- observed_indices[folds[[fold]]]
+        train_set <- matrix
+        train_set[test_indices] <- NA
+        train_set <-  convert_to_incomplete(train_set)
+        
+        rank_max <- min(dim(train_set))
+        rank <- min (rank, rank_max)
+        if (rank_max < 1) {
+          stop("rank.max must be at least 1.")
+        }
         
         # Perform soft impute
-        fit <- softImpute(train_matrix, rank.max = rank, lambda = lambda)
-        completed_matrix <- complete(matrix, fit)
+        fit <- softImpute(train_set,lambda = lambda, rank.max=rank, type = "als")
+        completed_matrix <- softImpute::complete(train_set, fit)
+        if(lambda == 0.1 & rank ==50){
+          View(completed_matrix)
+        }
+        # Collect true and predicted ratings
+        true_ratings <- numeric()
+        predicted_ratings <- numeric()
+        for (i in seq_len(nrow(matrix))) {
+          for (j in seq_len(ncol(matrix))) {
+            index <- (i - 1) * ncol(matrix) + j
+            if (index %in% test_indices) {
+              if (!is.na(matrix[i, j])) {
+                true_ratings <- c(true_ratings, matrix[i, j])
+                predicted_ratings <- c(predicted_ratings, completed_matrix[i, j])
+              }
+            }
+          }
+        }
         
-        # Calculate the error on the test set
-        errors[fold] <- sqrt(mean((matrix[test_indices] - completed_matrix[test_indices])^2, na.rm = TRUE))
+        # Calculate RMSE and MAE
+        rmse_errors[fold] <- calculate_rmse(true_ratings, predicted_ratings)
+        mae_errors[fold] <- calculate_mae(true_ratings, predicted_ratings)
+        elapsed_time <- Sys.time() - start_time
+        remaining_time <- (total_iterations - iteration) * (elapsed_time / iteration)
+        
+        cat(sprintf("Iteration %d of %d completed. Estimated remaining time: %s\n", iteration, total_iterations, remaining_time))
+        iteration <- iteration + 1
       }
       
       # Calculate the mean error for this combination of lambda and rank
-      mean_error <- mean(errors)
+      mean_rmse <- mean(rmse_errors, na.rm = TRUE)
+      mean_mae <- mean(mae_errors, na.rm = TRUE)
       
-      # Update the best parameters if the current mean error is lower
-      if (mean_error < best_error) {
-        best_lambda <- lambda
-        best_rank <- rank
-        best_error <- mean_error
+      # Update the best parameters if the current mean RMSE or MAE is lower
+      if (mean_rmse < best_rmse) {
+        best_lambda_rmse <- lambda
+        best_rank_rmse <- rank
+        best_rmse <- mean_rmse
       }
+      
+      if (mean_mae < best_mae) {
+        best_lambda_mae <- lambda
+        best_rank_mae <- rank
+        best_mae <- mean_mae
+      }
+      
+      # Store the results
+      rmse_results <- rbind(rmse_results, data.frame(lambda = lambda, rank = rank, rmse = mean_rmse))
+      mae_results <- rbind(mae_results, data.frame(lambda = lambda, rank = rank, mae = mean_mae))
+      
     }
   }
   
-  return(list(best_lambda = best_lambda, best_rank = best_rank, best_error = best_error))
+  # Print the best parameter combinations
+  cat("Best parameters for RMSE:\n")
+  cat("Lambda:", best_lambda_rmse, "Rank:", best_rank_rmse, "RMSE:", best_rmse, "\n\n")
+  
+  cat("Best parameters for MAE:\n")
+  cat("Lambda:", best_lambda_mae, "Rank:", best_rank_mae, "MAE:", best_mae, "\n\n")
+  
+  return(list(best_lambda_rmse = best_lambda_rmse, best_rank_rmse = best_rank_rmse, best_rmse = best_rmse, 
+              best_lambda_mae = best_lambda_mae, best_rank_mae = best_rank_mae, best_mae = best_mae, 
+              rmse_results = rmse_results, mae_results = mae_results))
 }
 
 # Define the grid of parameters to search
-lambda_seq <- seq(0.1, 5, by = 0.5)
-rank_seq <- seq(50, 200, by = 25)
+lambda_seq <- seq(0.01, 2, by = 1)
+rank_seq <- seq(50, 100, by = 50)
+
 
 # Run the cross-validation to find the optimal parameters
-result <- cv_softImpute(train_matrix, lambda_seq, rank_seq, n_folds = 1)
+result <- cv_softImpute(train_matrix, lambda_seq, rank_seq, n_folds = 3)
 
-# Output the result
-print(result)
+# Print the best parameters
+cat("Best parameters for RMSE:\n")
+cat("Lambda:", result$best_lambda_rmse, "Rank:", result$best_rank_rmse, "RMSE:", result$best_rmse, "\n\n")
+
+cat("Best parameters for MAE:\n")
+cat("Lambda:", result$best_lambda_mae, "Rank:", result$best_rank_mae, "MAE:", result$best_mae, "\n\n")
+
+# Plot the RMSE results
+ggplot(result$rmse_results, aes(x = lambda, y = rank, fill = rmse)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "red") +
+  labs(title = "RMSE for different Lambda and Rank combinations",
+       x = "Lambda", y = "Rank", fill = "RMSE") +
+  theme_minimal()
+
+# Plot the MAE results
+ggplot(result$mae_results, aes(x = lambda, y = rank, fill = mae)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "blue") +
+  labs(title = "MAE for different Lambda and Rank combinations",
+       x = "Lambda", y = "Rank", fill = "MAE") +
+  theme_minimal()
+
+sparse_train <- train_matrix
+biscaled_train <- biScale(sparse_train, trace = TRUE)
+train_fit <- softImpute(biscaled_train, lambda = 0.8, rank.max = 100, trace.it = TRUE, type = "als")
+debiased_train_fit <- deBias(sparse_train, train_fit)
+complete_train <- softImpute::complete(biscaled_train, train_fit)
+
+
+# Collect true and predicted ratings
+true_ratings <- numeric()
+predicted_ratings <- numeric()
+individual_rmse <- numeric()
+individual_mae <- numeric()
+
+observed_indices <- which(!is.na(test_matrix), arr.ind = TRUE)
+
+for (idx in seq_len(nrow(observed_indices))) {
+  i <- observed_indices[idx, 1]
+  j <- observed_indices[idx, 2]
+  
+  true_ratings <- c(true_ratings, ratings_matrix[i, j])
+  predicted_ratings <- c(predicted_ratings, complete_train[i, j])
+  individual_rmse <- c(individual_rmse, calculate_rmse(ratings_matrix[i,j], complete_train[i, j]))
+  individual_mae <- c(individual_mae, calculate_mae(ratings_matrix[i, j], complete_train[i, j]))
+  }
+
+
+# Calculate RMSE and MAE
+rmse <- calculate_rmse(true_ratings, predicted_ratings)
+mae <- calculate_mae(true_ratings, predicted_ratings)
+
+# Print the results
+cat("RMSE:", rmse, "\n")
+cat("MAE:", mae, "\n")
+
+# Flatten the matrix to a vector for easier computation
+ratings_vector <- as.vector(complete_train)
+
+# Remove NA values if there are any
+ratings_vector <- ratings_vector[!is.na(ratings_vector)]
+
+# Calculate descriptive statistics
+mean_rating <- mean(predicted_ratings)
+median_rating <- median(predicted_ratings)
+sd_rating <- sd(predicted_ratings)
+min_rating <- min(predicted_ratings)
+max_rating <- max(predicted_ratings)
+
+# Print descriptive statistics
+cat("Descriptive Statistics of Ratings:\n")
+cat("Mean:", mean_rating, "\n")
+cat("Median:", median_rating, "\n")
+cat("Standard Deviation:", sd_rating, "\n")
+cat("Minimum:", min_rating, "\n")
+cat("Maximum:", max_rating, "\n")
+
+ggplot(data.frame(rating = ratings_vector), aes(x = rating)) +
+  geom_histogram(binwidth = 0.1, fill = "lightblue", color = "black", alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Distribution of Ratings",
+       x = "Rating",
+       y = "Frequency")
+
+# Plot the distribution of predicted ratings for the observed indices
+ggplot(data.frame(rating = predicted_ratings), aes(x = rating)) +
+  geom_histogram(binwidth = 0.1, fill = "lightblue", color = "black", alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Distribution of Predicted Ratings at Test Indices",
+       x = "Predicted Rating",
+       y = "Frequency")
+
+# Define functions to calculate individual RMSE and MAE
+calculate_individual_rmse <- function(actual, predicted) {
+  sqrt((actual - predicted)^2)
+}
+
+calculate_individual_mae <- function(actual, predicted) {
+  abs(actual - predicted)
+}
+
+# Function to compute average RMSE and MAE for each true rating
+compute_average_errors <- function(true_ratings, predicted_ratings) {
+  results_df <- data.frame(
+    true_rating = true_ratings,
+    predicted_rating = predicted_ratings,
+    rmse = mapply(calculate_individual_rmse, true_ratings, predicted_ratings),
+    mae = mapply(calculate_individual_mae, true_ratings, predicted_ratings)
+  )
+  
+  average_results_df <- results_df %>%
+    group_by(true_rating) %>%
+    summarise(
+      avg_rmse = mean(rmse),
+      avg_mae = mean(mae)
+    )
+  
+  return(average_results_df)
+}
+
+
+# Compute average RMSE and MAE for each true rating
+average_results_df <- compute_average_errors(true_ratings, predicted_ratings)
+
+# Plot the average RMSE for each true rating
+ggplot(average_results_df, aes(x = factor(true_rating), y = avg_rmse)) +
+  geom_bar(stat = "identity", fill = "blue", alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Average RMSE for Each True Rating",
+       x = "True Rating",
+       y = "Average RMSE")
+
+# Plot the average MAE for each true rating
+ggplot(average_results_df, aes(x = factor(true_rating), y = avg_mae)) +
+  geom_bar(stat = "identity", fill = "red", alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Average MAE for Each True Rating",
+       x = "True Rating",
+       y = "Average MAE")
+
