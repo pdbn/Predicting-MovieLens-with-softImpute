@@ -178,8 +178,8 @@ test_mask <- matrix(FALSE, nrow=nrow(ratings_matrix), ncol=ncol(ratings_matrix))
 # Step 2: Identify indices of the observed (non-NA) entries
 observed_indices <- which(!is.na(as.matrix(ratings_matrix)), arr.ind=TRUE)
 
-# Step 3: Randomly select 10% of these indices for testing
-sample_size <- floor(0.001 * nrow(observed_indices))
+# Step 3: Randomly select 20% of these indices for testing
+sample_size <- floor(0.2 * nrow(observed_indices))
 selected_indices <- observed_indices[sample(seq_len(nrow(observed_indices)), size = sample_size), ]
 
 # Update test_mask in a vectorized manner
@@ -212,7 +212,7 @@ calculate_mae <- function(true_ratings, predicted_ratings) {
   mean(abs(true_ratings - predicted_ratings))
 }
 
-# NMAE????
+# NMAE (if interested)
 
 ###-----------------------------------------------------------------------------###
 #K-fold cross validation on train matrix for tuning parameters
@@ -361,7 +361,7 @@ for (idx in seq_len(nrow(observed_indices))) {
   predicted_ratings <- c(predicted_ratings, complete_train[i, j])
   individual_rmse <- c(individual_rmse, calculate_rmse(ratings_matrix[i,j], complete_train[i, j]))
   individual_mae <- c(individual_mae, calculate_mae(ratings_matrix[i, j], complete_train[i, j]))
-  }
+}
 
 
 # Calculate RMSE and MAE
@@ -371,6 +371,9 @@ mae <- calculate_mae(true_ratings, predicted_ratings)
 # Print the results
 cat("RMSE:", rmse, "\n")
 cat("MAE:", mae, "\n")
+
+###----------------------------------------------------------------------------###
+# Errors Analysis for fitted test
 
 # Flatten the matrix to a vector for easier computation
 ratings_vector <- as.vector(complete_train)
@@ -455,4 +458,64 @@ ggplot(average_results_df, aes(x = factor(true_rating), y = avg_mae)) +
   labs(title = "Average MAE for Each True Rating",
        x = "True Rating",
        y = "Average MAE")
+
+
+# Segment Analysis
+# Define segments based on user activity
+user_activity <- data.frame(userId = unique(observed_indices[, 1]))
+user_activity <- user_activity %>%
+  mutate(rating_count = rowSums(!is.na(train_matrix[userId, ]))) %>%
+  mutate(segment = case_when(
+    rating_count > quantile(rating_count, 0.75) ~ "high_activity",
+    rating_count < quantile(rating_count, 0.25) ~ "low_activity",
+    TRUE ~ "medium_activity"
+  ))
+
+# Define segments based on item popularity
+item_popularity <- data.frame(movieId = unique(observed_indices[, 2]))
+item_popularity <- item_popularity %>%
+  mutate(rating_count = colSums(!is.na(train_matrix[, movieId]))) %>%
+  mutate(segment = case_when(
+    rating_count > quantile(rating_count, 0.75) ~ "popular",
+    rating_count < quantile(rating_count, 0.25) ~ "niche",
+    TRUE ~ "average"
+  ))
+
+# Merge segments with ratings data
+ratings_segment <- data.frame(userId = observed_indices[, 1], movieId = observed_indices[, 2], 
+                              true_rating = true_ratings, predicted_rating = predicted_ratings)
+
+ratings_segment <- ratings_segment %>%
+  left_join(user_activity, by = "userId") %>%
+  left_join(item_popularity, by = "movieId", suffix = c("_user", "_movie"))
+
+# Evaluate performance for each user activity segment
+user_segments <- unique(ratings_segment$segment_user)
+for (segment in user_segments) {
+  segment_data <- ratings_segment %>% filter(segment_user == segment)
+  segment_rmse <- calculate_rmse(segment_data$true_rating, segment_data$predicted_rating)
+  segment_mae <- calculate_mae(segment_data$true_rating, segment_data$predicted_rating)
+  cat(sprintf("User segment: %s, RMSE: %.2f, MAE: %.2f\n", segment, segment_rmse, segment_mae))
+}
+
+# Evaluate performance for each item popularity segment
+item_segments <- unique(ratings_segment$segment_movie)
+for (segment in item_segments) {
+  segment_data <- ratings_segment %>% filter(segment_movie == segment)
+  segment_rmse <- calculate_rmse(segment_data$true_rating, segment_data$predicted_rating)
+  segment_mae <- calculate_mae(segment_data$true_rating, segment_data$predicted_rating)
+  cat(sprintf("Item segment: %s, RMSE: %.2f, MAE: %.2f\n", segment, segment_rmse, segment_mae))
+}
+
+# Plot error distributions
+# Histogram of errors for each user activity segment
+ggplot(ratings_segment, aes(x = true_rating - predicted_rating)) +
+  geom_histogram(binwidth = 0.5, fill = "blue", alpha = 0.7) +
+  facet_wrap(~segment_user) +
+  labs(title = "Error Distribution by User Activity Segment", x = "Error", y = "Count")
+
+# Boxplot of errors for each item popularity segment
+ggplot(ratings_segment, aes(x = segment_movie, y = true_rating - predicted_rating)) +
+  geom_boxplot(fill = "orange", alpha = 0.7) +
+  labs(title = "Error Distribution by Item Popularity Segment", x = "Item Popularity Segment", y = "Error")
 
