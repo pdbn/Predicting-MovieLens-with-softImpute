@@ -121,12 +121,10 @@ convert_Incomplete <- function(matrix){
   return(incomplete_matrix)
 }
 
-#So far not used
-
+#Not used:
 ratings_incomplete <- convert_Incomplete(ratings_matrix)
-
 # Scaling data 
-ratings_scaled <- biScale(ratings_incomplete, trace = TRUE)  # Final transformed matrix
+ratings_scaled <- biScale(ratings_incomplete, trace = TRUE) 
 
 ###-----------------------------------------------------------------------------###
 # Initial plots and graphs for ratings sample/matrix
@@ -178,8 +176,8 @@ test_mask <- matrix(FALSE, nrow=nrow(ratings_matrix), ncol=ncol(ratings_matrix))
 # Step 2: Identify indices of the observed (non-NA) entries
 observed_indices <- which(!is.na(as.matrix(ratings_matrix)), arr.ind=TRUE)
 
-# Step 3: Randomly select 10% of these indices for testing
-sample_size <- floor(0.001 * nrow(observed_indices))
+# Step 3: Randomly select 20% of these indices for testing
+sample_size <- floor(0.2 * nrow(observed_indices))
 selected_indices <- observed_indices[sample(seq_len(nrow(observed_indices)), size = sample_size), ]
 
 # Update test_mask in a vectorized manner
@@ -212,10 +210,10 @@ calculate_mae <- function(true_ratings, predicted_ratings) {
   mean(abs(true_ratings - predicted_ratings))
 }
 
-# NMAE????
-
 ###-----------------------------------------------------------------------------###
-#K-fold cross validation on train matrix for tuning parameters
+#Parameters tuning 
+
+# K-fold cross validation on train matrix for tuning parameters
 cv_softImpute <- function(matrix, lambda_seq, rank_seq, n_folds) {
   # Create indices for the folds
   observed_indices <- which(!is.na(matrix))
@@ -233,11 +231,8 @@ cv_softImpute <- function(matrix, lambda_seq, rank_seq, n_folds) {
   # Initialize data frames to store results
   rmse_results <- data.frame(lambda = numeric(), rank = numeric(), rmse = numeric())
   mae_results <- data.frame(lambda = numeric(), rank = numeric(), mae = numeric())
-  
-  total_iterations <- length(lambda_seq) * length(rank_seq) * n_folds
-  iteration <- 0
-  start_time <- Sys.time()
-  
+
+
   # Perform grid search
   for (lambda in lambda_seq) {
     for (rank in rank_seq) {
@@ -251,7 +246,7 @@ cv_softImpute <- function(matrix, lambda_seq, rank_seq, n_folds) {
         
         # Perform soft impute
         train_set <- convert_Incomplete(train_set)
-        train_set <- biScale(train_set)
+        train_set <- biScale(train_set)   #scale data (necessary)
         fit <- softImpute(train_set,lambda = lambda, rank.max=rank, type = "als")
         completed_matrix <- softImpute::complete(train_set, fit)
 
@@ -263,11 +258,6 @@ cv_softImpute <- function(matrix, lambda_seq, rank_seq, n_folds) {
         # Calculate RMSE and MAE
         rmse_errors[fold] <- calculate_rmse(true_ratings, predicted_ratings)
         mae_errors[fold] <- calculate_mae(true_ratings, predicted_ratings)
-        elapsed_time <- Sys.time() - start_time
-        remaining_time <- (total_iterations - iteration) * (elapsed_time / iteration)
-        
-        cat(sprintf("Iteration %d of %d completed. Estimated remaining time: %s\n", iteration, total_iterations, remaining_time))
-        iteration <- iteration + 1
       }
       
       # Calculate the mean error for this combination of lambda and rank
@@ -307,12 +297,12 @@ cv_softImpute <- function(matrix, lambda_seq, rank_seq, n_folds) {
 }
 
 # Define the grid of parameters to search
-lambda_seq <- seq(0.1, 2, by = 0.45)
-rank_seq <- seq(50, 100, by = 20)
+lambda_seq <- seq(0.1, 2, by = 0.3)
+rank_seq <- seq(20, 100, by = 20)
 
 
 # Run the cross-validation to find the optimal parameters
-result <- cv_softImpute(train_matrix, lambda_seq, rank_seq, n_folds = 3)
+result <- cv_softImpute(train_matrix, lambda_seq, rank_seq, n_folds = 5)
 
 # Print the best parameters
 cat("Best parameters for RMSE:\n")
@@ -338,12 +328,11 @@ ggplot(result$mae_results, aes(x = lambda, y = rank, fill = mae)) +
   theme_minimal()
 
 ###---------------------------------------------------------------------------###
-# Fit to predict test
-train_matrix <- convert_Incomplete(train_matrix)
-train_matrix <- biScale(train_matrix, trace = TRUE)
-fit <- softImpute(train_matrix, lambda = 1.9, rank.max = 90, trace.it = TRUE)
-complete_train <- complete(train_matrix, fit)
-
+# Fit to predict test using tuned parameters
+incomplete_train_matrix <- convert_Incomplete(train_matrix)
+scaled_train_matrix <- biScale(incomplete_train_matrix, trace = TRUE)
+fit <- softImpute(train_matrix, lambda = result$best_lambda_mae, rank.max = result$best_rank_mae, trace.it = TRUE)
+complete_train <- complete(scaled_train_matrix, fit)
 
 # Collect true and predicted ratings
 true_ratings <- numeric()
@@ -372,10 +361,8 @@ mae <- calculate_mae(true_ratings, predicted_ratings)
 cat("RMSE:", rmse, "\n")
 cat("MAE:", mae, "\n")
 
-# Flatten the matrix to a vector for easier computation
+# Flatten the matrix to a vector for easier computation for plotting
 ratings_vector <- as.vector(complete_train)
-
-# Remove NA values if there are any
 ratings_vector <- ratings_vector[!is.na(ratings_vector)]
 
 # Calculate descriptive statistics
@@ -456,3 +443,175 @@ ggplot(average_results_df, aes(x = factor(true_rating), y = avg_mae)) +
        x = "True Rating",
        y = "Average MAE")
 
+
+###-----------------------------------------------------------------------------###
+#Plots and graphs to analyze performance 
+
+# Compute the number of ratings each user has given in the train set
+user_activity <- data.frame(
+  user = 1:nrow(train_matrix),
+  rating_count = rowSums(!is.na(train_matrix))
+)
+# Compute the average rating for each movie in the train set
+movie_avg_rating <- data.frame(
+  movie = 1:ncol(train_matrix),
+  avg_rating = colMeans(train_matrix, na.rm = TRUE)
+)
+
+# Merge user activity with error metrics
+user_errors <- data.frame(user = observed_indices[, 1], rmse = individual_rmse, mae = individual_mae)
+user_merged <- merge(user_errors, user_activity, by = "user")
+
+# Analyze correlation between user rating count and error metrics
+user_analysis <- user_merged %>%
+  group_by(rating_count) %>%
+  summarise(avg_rmse = mean(rmse), avg_mae = mean(mae))
+
+# Plot user analysis results
+ggplot(user_analysis, aes(x = rating_count, y = avg_rmse)) +
+  geom_line(color = "blue") +
+  theme_minimal() +
+  labs(title = "Average RMSE vs. User Rating Count",
+       x = "User Rating Count",
+       y = "Average RMSE")
+
+ggplot(user_analysis, aes(x = rating_count, y = avg_mae)) +
+  geom_line(color = "red") +
+  theme_minimal() +
+  labs(title = "Average MAE vs. User Rating Count",
+       x = "User Rating Count",
+       y = "Average MAE")
+
+# Count the number of users with 45-55 ratings, grouped by each specific count
+user_count_45_55 <- user_activity %>%
+  filter(rating_count >= 45 & rating_count <= 55) %>%
+  group_by(rating_count) %>%
+  summarise(count = n())
+
+# Print the number of users for each specific rating count
+print(user_count_45_55)
+
+# Optional: Print detailed output for clarity
+cat("Number of users with 45-55 ratings:\n")
+user_count_45_55 %>%
+  rowwise() %>%
+  do(cat("Rating Count:", .$rating_count, " - Number of Users:", .$count, "\n"))
+
+# Inspect individual errors for users with 45-50 ratings
+errors_45_55 <- user_merged %>%
+  filter(rating_count >= 45 & rating_count <= 55)
+
+# Print summary of errors for users with 45-50 ratings
+summary(errors_45_55$rmse)
+summary(errors_45_55$mae)
+
+# Plot individual errors for users with 45-50 ratings
+ggplot(errors_45_55, aes(x = factor(rating_count), y = rmse)) +
+  geom_boxplot(fill = "lightblue", color = "black", alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "RMSE for Users with 45-55 Ratings",
+       x = "Rating Count",
+       y = "RMSE")
+
+ggplot(errors_45_55, aes(x = factor(rating_count), y = mae)) +
+  geom_boxplot(fill = "lightblue", color = "black", alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "MAE for Users with 45-55 Ratings",
+       x = "Rating Count",
+       y = "MAE")
+
+# Merge movie average rating with error metrics
+movie_errors <- data.frame(movie = observed_indices[, 2], rmse = individual_rmse, mae = individual_mae)
+movie_merged <- merge(movie_errors, movie_avg_rating, by = "movie")
+
+# Analyze correlation between movie average rating and error metrics
+movie_analysis <- movie_merged %>%
+  group_by(avg_rating) %>%
+  summarise(avg_rmse = mean(rmse), avg_mae = mean(mae))
+
+# Plot movie analysis results
+ggplot(user_analysis, aes(x = rating_count, y = avg_mae)) +
+  geom_point(color = "blue") +
+  geom_smooth(method = "loess", color = "blue") +
+  theme_minimal() +
+  labs(title = "Average RMSE vs. User Rating Count",
+       x = "User Rating Count",
+       y = "Average RMSE")
+
+ggplot(movie_analysis, aes(x = avg_rating, y = avg_mae)) +
+  geom_line(color = "red") +
+  theme_minimal() +
+  labs(title = "Average MAE vs. Movie Average Rating",
+       x = "Movie Average Rating",
+       y = "Average MAE")
+
+###-------------------------------------------------------------------------------###
+# Calculate prediction bias
+prediction_bias <- data.frame(
+  true_rating = true_ratings,
+  predicted_rating = predicted_ratings,
+  bias = predicted_ratings - true_ratings
+)
+
+# Summarize bias statistics
+bias_summary <- prediction_bias %>%
+  summarise(
+    mean_bias = mean(bias),
+    median_bias = median(bias),
+    min_bias = min(bias),
+    max_bias = max(bias),
+    sd_bias = sd(bias)
+  )
+
+print(bias_summary)
+
+# Plot the distribution of prediction bias
+ggplot(prediction_bias, aes(x = bias)) +
+  geom_histogram(binwidth = 0.1, fill = "lightblue", color = "black", alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Distribution of Prediction Bias",
+       x = "Prediction Bias (Predicted - True)",
+       y = "Frequency")
+
+# Plot bias as a function of true ratings
+ggplot(prediction_bias, aes(x = true_rating, y = bias)) +
+  geom_point(color = "blue", alpha = 0.5) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  theme_minimal() +
+  labs(title = "Prediction Bias by True Rating",
+       x = "True Rating",
+       y = "Prediction Bias (Predicted - True)")
+
+###-----------------------------------------------------------------------------###
+# Confusion matrix 
+
+
+# Define the bins for ratings
+bins <- seq(0.5, 5.5, by = 0.5)  # Note: 5.5 is included to create an interval for [5, 5.5)
+bin_labels <- as.character(seq(0.5, 5, by = 0.5))  # This should be length(bins) - 1
+
+# Bin the true and predicted ratings
+true_ratings_binned <- cut(true_ratings, breaks = bins, labels = bin_labels, include.lowest = TRUE)
+predicted_ratings_binned <- cut(predicted_ratings, breaks = bins, labels = bin_labels, include.lowest = TRUE)
+
+# Create the confusion matrix
+conf_matrix <- confusionMatrix(predicted_ratings_binned, true_ratings_binned)
+
+# Print the confusion matrix
+print(conf_matrix)
+
+# Convert the confusion matrix to a data frame for visualization
+conf_matrix_df <- as.data.frame(conf_matrix$table)
+colnames(conf_matrix_df) <- c("Predicted", "True", "Frequency")
+
+# Visualize the confusion matrix
+ggplot(data = conf_matrix_df, aes(x = True, y = Predicted, fill = Frequency)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "lightblue", high = "red") +
+  theme_minimal() +
+  labs(title = "Confusion Matrix",
+       x = "True Rating",
+       y = "Predicted Rating",
+       fill = "Frequency")
+
+#Should i change frequency to % distribution of respective ratings?
